@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/logo.png" alt="API Quota Watchdog" width="350"/>
+  <img src="./assets/logo_watchdog.png" alt="API Quota Watchdog" width="350"/>
 </p>
 
 <h1 align="center">API Quota Watchdog</h1>
