@@ -36,54 +36,75 @@ func New(db *sql.DB) *Store {
 // GetProviderByName fetches a provider record by its unique name.
 // Returns sql.ErrNoRows if no matching provider exists.
 func (s *Store) GetProviderByName(ctx context.Context, name string) (Provider, error) {
-	// TODO: implement
-	// SELECT id, name, base_url, api_key_header, api_key_value
-	// FROM providers WHERE name = $1
-	_ = name
-	return Provider{}, nil
+	const q = `
+		SELECT id, name, base_url, api_key_header, api_key_value
+		FROM providers
+		WHERE name = $1`
+
+	var p Provider
+	err := s.db.QueryRowContext(ctx, q, name).Scan(
+		&p.ID,
+		&p.Name,
+		&p.BaseURL,
+		&p.APIKeyHeader,
+		&p.APIKeyValue,
+	)
+	return p, err
 }
 
 // RecordUsage inserts a usage record for a single proxied request.
-// providerID and serviceID are foreign keys; method is the HTTP method;
-// statusCode is the upstream HTTP response status; latencyMs is the round-trip
-// latency in milliseconds.
+// providerID is a required foreign key. serviceID 0 is stored as NULL
+// because the caller may not yet be identified via JWT claims.
+// method is the HTTP method; statusCode is the upstream response status;
+// latencyMs is the round-trip latency in milliseconds.
 func (s *Store) RecordUsage(ctx context.Context, providerID, serviceID int64, method string, statusCode int, latencyMs int64) error {
-	// TODO: implement
-	// INSERT INTO usage_records (provider_id, service_id, method, status_code, latency_ms, recorded_at)
-	// VALUES ($1, $2, $3, $4, $5, NOW())
-	_, _, _, _, _ = providerID, serviceID, method, statusCode, latencyMs
-	return nil
+	const q = `
+		INSERT INTO usage_records (provider_id, service_id, method, status_code, latency_ms, recorded_at)
+		VALUES ($1, NULLIF($2, 0), $3, $4, $5, NOW())`
+
+	_, err := s.db.ExecContext(ctx, q, providerID, serviceID, method, statusCode, latencyMs)
+	return err
 }
 
 // GetQuotaUsage returns the total request count (used) and the configured
-// quota limit (limit) for a given provider within the current billing window.
-// Returns sql.ErrNoRows if no quota configuration exists for the provider.
+// request limit for a given provider within the current billing window.
+// If no quota row exists for the provider, used and limit are both 0 (no enforcement).
 func (s *Store) GetQuotaUsage(ctx context.Context, providerID int64) (used int64, limit int64, err error) {
-	// TODO: implement
-	// SELECT COUNT(*) as used, q.request_limit as limit
-	// FROM usage_records ur
-	// JOIN quotas q ON q.provider_id = ur.provider_id
-	// WHERE ur.provider_id = $1
-	//   AND ur.recorded_at >= q.window_start
-	// GROUP BY q.request_limit
-	_ = providerID
-	return 0, 0, nil
+	const q = `
+		SELECT COUNT(ur.id), q.request_limit
+		FROM quotas q
+		LEFT JOIN usage_records ur
+			ON  ur.provider_id = q.provider_id
+			AND ur.recorded_at >= q.window_start
+		WHERE q.provider_id = $1
+		GROUP BY q.request_limit`
+
+	err = s.db.QueryRowContext(ctx, q, providerID).Scan(&used, &limit)
+	if err == sql.ErrNoRows {
+		return 0, 0, nil
+	}
+	return used, limit, err
 }
 
 // GetQuotaThresholdCrossed returns true if the threshold alert for the given
 // provider has already been fired in the current window, preventing duplicate alerts.
+// Returns false if no quota row exists for the provider.
 func (s *Store) GetQuotaThresholdCrossed(ctx context.Context, providerID int64) (bool, error) {
-	// TODO: implement
-	// SELECT threshold_crossed FROM quotas WHERE provider_id = $1
-	_ = providerID
-	return false, nil
+	const q = `SELECT threshold_crossed FROM quotas WHERE provider_id = $1`
+
+	var crossed bool
+	err := s.db.QueryRowContext(ctx, q, providerID).Scan(&crossed)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return crossed, err
 }
 
-// SetQuotaThresholdCrossed marks the threshold alert as fired for a provider
-// so that subsequent requests over the threshold do not re-fire the alert.
+// SetQuotaThresholdCrossed marks the threshold alert as fired (or resets it) for
+// a provider so that subsequent requests over the threshold do not re-fire the alert.
 func (s *Store) SetQuotaThresholdCrossed(ctx context.Context, providerID int64, crossed bool) error {
-	// TODO: implement
-	// UPDATE quotas SET threshold_crossed = $2 WHERE provider_id = $1
-	_, _ = providerID, crossed
-	return nil
+	const q = `UPDATE quotas SET threshold_crossed = $2 WHERE provider_id = $1`
+
+	_, err := s.db.ExecContext(ctx, q, providerID, crossed)
+	return err
 }

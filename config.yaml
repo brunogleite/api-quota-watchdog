@@ -1,0 +1,12 @@
+providers:
+  - name: openai
+    base_url: https://api.openai.com
+    api_key_header: Authorization
+
+  - name: twilio
+    base_url: https://api.twilio.com
+    api_key_header: Authorization
+
+  - name: googlemaps
+    base_url: https://maps.googleapis.com
+    api_key_header: X-Goog-Api-Key

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,31 +26,36 @@ func main() {
 	// the server never runs in an insecure state.
 	jwtSecret := os.Getenv("WATCHDOG_JWT_SECRET")
 	if jwtSecret == "" {
-		log.Fatal("WATCHDOG_JWT_SECRET environment variable is required")
+		slog.Error("WATCHDOG_JWT_SECRET environment variable is required")
+		os.Exit(1)
 	}
 
 	// DATABASE_URL must be set to a valid PostgreSQL connection string.
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		log.Fatal("DATABASE_URL environment variable is required")
+		slog.Error("DATABASE_URL environment variable is required")
+		os.Exit(1)
 	}
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		slog.Error("open database", "err", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	// Verify the connection is actually reachable before accepting traffic.
 	if err := db.Ping(); err != nil {
-		log.Fatalf("ping database: %v", err)
+		slog.Error("ping database", "err", err)
+		os.Exit(1)
 	}
 
 	// Load the initial configuration. If the file is absent the server should
 	// not start, because provider routing depends on it.
 	const configPath = "config.yaml"
 	if err := config.Load(configPath); err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.Error("load config", "err", err)
+		os.Exit(1)
 	}
 
 	// Start the hot-reload background goroutine.
@@ -78,7 +82,8 @@ func main() {
 	go func() {
 		slog.Info("server starting", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen and serve: %v", err)
+			slog.Error("listen and serve", "err", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -95,7 +100,8 @@ func main() {
 	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("server shutdown: %v", err)
+		slog.Error("server shutdown", "err", err)
+		os.Exit(1)
 	}
 
 	slog.Info("server stopped")
