@@ -13,7 +13,6 @@ import (
 	// lib/pq registers the "postgres" driver as a side effect.
 	_ "github.com/lib/pq"
 
-	"github.com/brunogleite/api-quota-watchdog/internal/config"
 	"github.com/brunogleite/api-quota-watchdog/internal/server"
 )
 
@@ -50,24 +49,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load the initial configuration. If the file is absent the server should
-	// not start, because provider routing depends on it.
-	const configPath = "config.yaml"
-	if err := config.Load(configPath); err != nil {
-		slog.Error("load config", "err", err)
-		os.Exit(1)
-	}
-
-	// Start the hot-reload background goroutine.
-	// Goroutine owner: main. Stopped by cancelling rootCtx on shutdown.
-	rootCtx, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
-
-	config.StartReloader(rootCtx, configPath, 15*time.Second)
-
 	srv := &http.Server{
 		Addr:         ":8080",
-		Handler:      server.NewServer(db),
+		Handler:      server.NewServer(db, []byte(jwtSecret)),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -90,10 +74,6 @@ func main() {
 	// Block until a termination signal is received.
 	<-quit
 	slog.Info("server shutting down")
-
-	// Cancel the root context to stop the config reloader and any other
-	// context-aware goroutines.
-	rootCancel()
 
 	// Give in-flight requests up to 30 seconds to complete.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)

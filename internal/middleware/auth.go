@@ -28,6 +28,27 @@ func ClaimsFromContext(ctx context.Context) (jwt.MapClaims, bool) {
 	return claims, ok
 }
 
+// UserIDFromContext reads the "user_id" claim from the JWT stored in ctx and
+// returns it as int64. JWT numeric claims are encoded as float64 by the library,
+// so the conversion is explicit here. Returns (0, false) when the claim is
+// absent or is not a numeric type.
+func UserIDFromContext(ctx context.Context) (int64, bool) {
+	claims, ok := ClaimsFromContext(ctx)
+	if !ok {
+		return 0, false
+	}
+	raw, ok := claims["user_id"]
+	if !ok {
+		return 0, false
+	}
+	// golang-jwt/jwt encodes JSON numbers as float64 in MapClaims.
+	f, ok := raw.(float64)
+	if !ok {
+		return 0, false
+	}
+	return int64(f), true
+}
+
 // Auth returns an HTTP middleware that validates HS256 JWT tokens supplied in
 // the Authorization: Bearer <token> header. On validation failure it writes a
 // 401 response via apperror and halts the handler chain. On success it injects

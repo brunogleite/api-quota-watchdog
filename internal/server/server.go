@@ -10,6 +10,7 @@ import (
 	"github.com/brunogleite/api-quota-watchdog/internal/alert"
 	"github.com/brunogleite/api-quota-watchdog/internal/handler"
 	"github.com/brunogleite/api-quota-watchdog/internal/middleware"
+	"github.com/brunogleite/api-quota-watchdog/internal/mock"
 	"github.com/brunogleite/api-quota-watchdog/internal/proxy"
 	"github.com/brunogleite/api-quota-watchdog/internal/quota"
 	"github.com/brunogleite/api-quota-watchdog/internal/store"
@@ -17,41 +18,45 @@ import (
 
 // Server holds the HTTP multiplexer and all application-level dependencies.
 type Server struct {
-	mux          *http.ServeMux
-	proxyHandler *handler.ProxyHandler
-	authMiddleware func(http.Handler) http.Handler
+	mux              *http.ServeMux
+	proxyHandler     *handler.ProxyHandler
+	authHandler      *handler.AuthHandler
+	providerHandler  *handler.ProviderHandler
+	authMiddleware   func(http.Handler) http.Handler
 }
 
-// NewServer constructs a Server, wires all dependencies from the provided *sql.DB,
-// and registers routes. The JWT secret and webhook URL are read from environment
-// variables so that NewServer remains pure and testable.
-func NewServer(db *sql.DB) *Server {
-	// Instantiate the data access layer.
+// NewServer constructs a Server, wires all dependencies from the provided *sql.DB
+// and jwtSecret, and registers routes.
+//
+// jwtSecret is passed in (not read from env here) so that main.go is the single
+// point that reads environment variables for security-sensitive config.
+// WATCHDOG_WEBHOOK_URL is optional and is still read internally since it is not
+// a security-critical secret.
+func NewServer(db *sql.DB, jwtSecret []byte) *Server {
 	st := store.New(db)
 
-	// Instantiate the quota enforcer backed by the store.
 	enforcer := quota.NewEnforcer(st)
 
-	// Instantiate the alert dispatcher. WATCHDOG_WEBHOOK_URL is optional;
-	// if absent, the dispatcher will simply log errors on dispatch attempts.
+	// WATCHDOG_WEBHOOK_URL is optional; if absent, the dispatcher logs errors
+	// on dispatch attempts but does not crash.
 	webhookURL := os.Getenv("WATCHDOG_WEBHOOK_URL")
 	dispatcher := alert.NewDispatcher(webhookURL)
 
-	// Instantiate the proxy, which handles upstream forwarding.
-	fwd := proxy.New(st)
+	fwd := proxy.New()
+	mockR := mock.NewResponder()
+	proxyH := handler.NewProxyHandler(fwd, enforcer, dispatcher, st, mockR)
 
-	// Instantiate the proxy handler, composing all sub-dependencies.
-	proxyH := handler.NewProxyHandler(fwd, enforcer, dispatcher, st)
+	authH := handler.NewAuthHandler(st, jwtSecret)
+	providerH := handler.NewProviderHandler(st)
 
-	// The JWT secret is guaranteed non-empty at this point because main.go
-	// refuses to start if WATCHDOG_JWT_SECRET is absent.
-	jwtSecret := []byte(os.Getenv("WATCHDOG_JWT_SECRET"))
 	authMW := middleware.Auth(jwtSecret)
 
 	s := &Server{
-		mux:            http.NewServeMux(),
-		proxyHandler:   proxyH,
-		authMiddleware: authMW,
+		mux:             http.NewServeMux(),
+		proxyHandler:    proxyH,
+		authHandler:     authH,
+		providerHandler: providerH,
+		authMiddleware:  authMW,
 	}
 	s.routes()
 	return s

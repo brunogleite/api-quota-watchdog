@@ -11,6 +11,8 @@ import (
 
 	"github.com/brunogleite/api-quota-watchdog/internal/alert"
 	"github.com/brunogleite/api-quota-watchdog/internal/apperror"
+	"github.com/brunogleite/api-quota-watchdog/internal/middleware"
+	"github.com/brunogleite/api-quota-watchdog/internal/mock"
 	"github.com/brunogleite/api-quota-watchdog/internal/proxy"
 	"github.com/brunogleite/api-quota-watchdog/internal/quota"
 	"github.com/brunogleite/api-quota-watchdog/internal/store"
@@ -20,26 +22,31 @@ import (
 const alertThreshold = 0.80
 
 // ProxyHandler handles incoming proxy requests, enforces quotas, forwards the
-// request to the upstream provider, and records usage.
+// request to the upstream provider (or the mock responder), and records usage.
 type ProxyHandler struct {
 	proxy  *proxy.Proxy
 	quota  *quota.Enforcer
 	alert  *alert.Dispatcher
 	store  *store.Store
+	mock   *mock.Responder
 }
 
 // NewProxyHandler constructs a ProxyHandler with the required dependencies.
-func NewProxyHandler(p *proxy.Proxy, q *quota.Enforcer, a *alert.Dispatcher, s *store.Store) *ProxyHandler {
+func NewProxyHandler(p *proxy.Proxy, q *quota.Enforcer, a *alert.Dispatcher, s *store.Store, m *mock.Responder) *ProxyHandler {
 	return &ProxyHandler{
 		proxy: p,
 		quota: q,
 		alert: a,
 		store: s,
+		mock:  m,
 	}
 }
 
 // ServeProxy handles POST /proxy/{provider}/{path...}.
-// It enforces quota, forwards the request, and records usage unconditionally.
+// It enforces quota, then either delegates to the mock responder (when the
+// provider has mock_enabled=true) or forwards to the real upstream. Usage is
+// recorded unconditionally after both paths.
+//
 // If quota recording fails, the error is logged but the response is not altered —
 // proxy availability beats perfect accounting.
 func (h *ProxyHandler) ServeProxy(w http.ResponseWriter, r *http.Request) {
@@ -51,8 +58,16 @@ func (h *ProxyHandler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch provider record including the stored API key.
-	provider, err := h.store.GetProviderByName(r.Context(), providerName)
+	// Extract the authenticated user ID. The Auth middleware guarantees this is
+	// present on all routes that use it, but we check defensively.
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		apperror.New(http.StatusUnauthorized, "missing or invalid user identity", nil).Write(w)
+		return
+	}
+
+	// Fetch the provider scoped to this user (enforces multi-tenant isolation).
+	provider, err := h.store.GetProviderByName(r.Context(), userID, providerName)
 	if err != nil {
 		apperror.New(http.StatusNotFound, "unknown provider", err).Write(w)
 		return
@@ -70,10 +85,19 @@ func (h *ProxyHandler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 
-	// Forward the request. statusCode tracks the upstream response for recording.
-	// We use a capturing ResponseWriter to observe the status code written by Forward.
+	// capturingResponseWriter observes the status code written by either the
+	// mock responder or the real proxy so it can be included in usage records.
 	crw := &capturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-	forwardErr := h.proxy.Forward(r.Context(), crw, r, provider, downstreamPath)
+
+	var forwardErr error
+	if provider.MockEnabled {
+		// Mock path: return a canned response without touching the real upstream.
+		h.mock.Respond(crw, r, providerName)
+	} else {
+		// Real path: forward to the upstream provider.
+		forwardErr = h.proxy.Forward(r.Context(), crw, r, provider, downstreamPath)
+	}
+
 	latencyMs := time.Since(start).Milliseconds()
 
 	if forwardErr != nil {
@@ -88,28 +112,26 @@ func (h *ProxyHandler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("proxy: request forwarded",
 		"provider", providerName,
+		"user_id", userID,
 		"method", r.Method,
 		"status", crw.statusCode,
 		"latency_ms", latencyMs,
+		"mock", provider.MockEnabled,
 	)
 
-	// Record usage unconditionally. serviceID is 0 for now — full service
-	// identification requires auth claims inspection (future work).
+	// Record usage unconditionally. serviceID is 0 (stored as NULL) because
+	// service-level identification is not part of the current auth claims.
 	const serviceID int64 = 0
 	if err := h.quota.Record(r.Context(), provider.ID, serviceID, r.Method, crw.statusCode, latencyMs); err != nil {
 		// Log and continue — proxy availability beats perfect accounting.
-		slog.Error("proxy: record usage failed",
-			"provider", providerName,
-			"err", err,
-		)
+		slog.Error("proxy: record usage failed", "provider", providerName, "err", err)
 	}
 
 	// Check whether the threshold has just been crossed and fire an alert.
 	// This is a fire-and-forget goroutine; it must not block the request path.
 	//
 	// Goroutine owner: ProxyHandler.ServeProxy. The goroutine is bounded by the
-	// Dispatcher's HTTP client timeout and the context passed in. No additional
-	// shutdown is required — the goroutine exits when Dispatch returns.
+	// Dispatcher's HTTP client timeout. No additional shutdown mechanism is needed.
 	used, limit, err := h.store.GetQuotaUsage(r.Context(), provider.ID)
 	if err == nil && quota.ThresholdExceeded(used, limit, alertThreshold) {
 		alreadyCrossed, err := h.store.GetQuotaThresholdCrossed(r.Context(), provider.ID)
